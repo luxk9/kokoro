@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kokoro Playground</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1c1e21; --muted:#6b7280; --accent:#4f46e5; --border:#e5e7eb; --err:#b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111317; --card:#1b1e24; --text:#e8eaed; --muted:#9aa0a6; --accent:#818cf8; --border:#2d3139; --err:#f87171; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,sans-serif; }
+  main { max-width:760px; margin:32px auto; padding:0 16px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:16px; }
+  textarea { width:100%; min-height:160px; resize:vertical; padding:12px; border-radius:8px; border:1px solid var(--border);
+             background:transparent; color:inherit; font:inherit; }
+  .row { display:flex; flex-wrap:wrap; gap:16px; align-items:end; margin-top:14px; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
+  select, input[type=range] { min-width:180px; }
+  select { padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--text); font:inherit; }
+  button { padding:10px 20px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .count { margin-left:auto; color:var(--muted); font-size:13px; }
+  audio { width:100%; margin-top:8px; }
+  .stats { color:var(--muted); font-size:13px; margin-top:8px; }
+  .phonemes { font-family:ui-monospace,monospace; font-size:13px; color:var(--muted); word-break:break-word; margin-top:8px; }
+  .err { color:var(--err); }
+  .samples { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .samples button { background:transparent; color:var(--accent); border:1px solid var(--border); padding:4px 10px; font-weight:500; font-size:13px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kokoro Playground</h1>
+  <p class="sub">Type some text, pick a voice, hit Generate. Running locally on <span id="device">…</span>.</p>
+
+  <div class="card">
+    <textarea id="text" maxlength="5000">Kokoro is an open-weight text to speech model with 82 million parameters. Despite its lightweight architecture, it delivers comparable quality to larger models.</textarea>
+    <div class="samples" id="samples"></div>
+    <div class="row">
+      <label>Voice <select id="voice"></select></label>
+      <label>Speed: <span id="speedVal">1.0×</span>
+        <input type="range" id="speed" min="0.5" max="2" step="0.1" value="1"></label>
+      <span class="count" id="count"></span>
+      <button id="go">Generate</button>
+    </div>
+  </div>
+
+  <div class="card" id="out" hidden>
+    <audio id="player" controls></audio>
+    <div class="stats" id="stats"></div>
+    <div class="phonemes" id="phonemes"></div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const SAMPLES = {
+  'Short': 'Hello! This is a quick test of the Kokoro speech model.',
+  'Questions': "Wait, you're telling me this runs on a laptop? That's amazing. How fast is it?",
+  'Numbers': 'The meeting is on March 3rd at 4:30 PM, and the budget is $12,500.',
+  'Long': 'The sky above the port was the color of television, tuned to a dead channel. "It\'s not like I\'m using," Case heard someone say, as he shouldered his way through the crowd around the door of the Chat.',
+};
+for (const [name, txt] of Object.entries(SAMPLES)) {
+  const b = document.createElement('button'); b.textContent = name;
+  b.onclick = () => { $('text').value = txt; updateCount(); };
+  $('samples').appendChild(b);
+}
+const updateCount = () => $('count').textContent = `${$('text').value.length} / 5000`;
+$('text').oninput = updateCount; updateCount();
+$('speed').oninput = () => $('speedVal').textContent = Number($('speed').value).toFixed(1) + '×';
+
+fetch('/api/voices').then(r => r.json()).then(({voices, device}) => {
+  $('device').textContent = device.toUpperCase();
+  for (const [lang, ids] of Object.entries(voices)) {
+    const g = document.createElement('optgroup'); g.label = lang;
+    for (const id of ids) { const o = document.createElement('option'); o.value = o.textContent = id; g.appendChild(o); }
+    $('voice').appendChild(g);
+  }
+});
+
+let lastUrl = null;
+$('go').onclick = async () => {
+  $('go').disabled = true; $('go').textContent = 'Generating…';
+  $('out').hidden = false; $('stats').textContent = ''; $('phonemes').textContent = '';
+  $('stats').className = 'stats';
+  try {
+    const r = await fetch('/api/tts', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: $('text').value, voice: $('voice').value, speed: $('speed').value}),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    const blob = await r.blob();
+    if (lastUrl) URL.revokeObjectURL(lastUrl);
+    lastUrl = URL.createObjectURL(blob);
+    $('player').src = lastUrl; $('player').play();
+    const gen = +r.headers.get('X-Gen-Seconds'), dur = +r.headers.get('X-Audio-Seconds');
+    $('stats').innerHTML = `${dur.toFixed(1)}s of audio in ${gen.toFixed(2)}s (${(dur / gen).toFixed(1)}× real-time) · ` +
+      `<a href="${lastUrl}" download="kokoro_${$('voice').value}.wav">Download WAV</a>`;
+    $('phonemes').textContent = decodeURIComponent(r.headers.get('X-Phonemes') || '');
+  } catch (e) {
+    $('player').removeAttribute('src');
+    $('stats').className = 'stats err'; $('stats').textContent = 'Error: ' + e.message;
+  } finally {
+    $('go').disabled = false; $('go').textContent = 'Generate';
+  }
+};
+</script>
+</body>
+</html>
